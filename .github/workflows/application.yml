@@ -1,15 +1,13 @@
 
-name: Deploy Flask App to Private EC2
+name: Deploy Flask Application to Private EC2
 
 on:
   push:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -17,44 +15,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout GitHub repository
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Step 2: Authenticate with AWS using OIDC
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::583960588058:role/OICD-role
-          aws-region: us-east-1
-
-      # Step 3: Verify AWS authentication
-      - name: Verify AWS Identity
-        run: aws sts get-caller-identity
-
-      # Step 4: Configure SSH
       - name: Configure SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          set -e
-
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
 
-      # Step 5: Configure Bastion and Private EC2
-      - name: Configure SSH Hosts
+      - name: Configure Bastion and Private EC2
         env:
           BASTION_HOST: ${{ secrets.BASTION_HOST }}
           BASTION_USER: ${{ secrets.BASTION_USER }}
           PRIVATE_HOST: ${{ secrets.PRIVATE_HOST }}
           PRIVATE_USER: ${{ secrets.PRIVATE_USER }}
         run: |
-          set -e
-
           cat > ~/.ssh/config <<EOF
           Host bastion
             HostName $BASTION_HOST
@@ -72,81 +52,79 @@ jobs:
 
           chmod 600 ~/.ssh/config
 
-      # Step 6: Verify Bastion connection
-      - name: Test Bastion Connection
-        run: |
-          ssh bastion "hostname"
-
-      # Step 7: Verify Private EC2 connection
       - name: Test Private EC2 Connection
         run: |
           ssh private-server "hostname && whoami"
 
-      # Step 8: Deploy Flask application on Private EC2
-      - name: Deploy Flask Application
+      # Copy Flask application from GitHub runner
+      # directly to Private EC2 through Bastion
+      - name: Copy Application to Private EC2
+        run: |
+          ssh private-server "mkdir -p ~/flask-app"
+
+          rsync -avz --delete \
+            -e "ssh" \
+            --exclude '.git' \
+            --exclude 'venv' \
+            ./ private-server:flask-app/
+
+      # Install dependencies and run Flask on Private EC2
+      - name: Deploy Flask on Private EC2
         run: |
           ssh private-server 'bash -s' <<'REMOTE'
             set -e
 
-            echo "Connected to Private EC2 successfully"
+            echo "Deploying on Private EC2"
 
-            # Install Python requirements
+            APP_DIR="$HOME/flask-app"
+
+            cd "$APP_DIR"
+
             sudo apt update
             sudo apt install -y python3 python3-pip python3-venv
 
-            # Create application directory
-            mkdir -p ~/flask-app
-            cd ~/flask-app
-
-            # Create virtual environment
             python3 -m venv venv
 
-            # Install Flask
             ./venv/bin/pip install flask
 
-            # Create Flask application
             cat > app.py <<'PYTHON'
-            from flask import Flask
+          from flask import Flask
 
-            app = Flask(__name__)
+          app = Flask(__name__)
 
-            @app.route("/")
-            def home():
-                return "Hello! Flask Application Deployed Successfully using GitHub Actions!"
+          @app.route("/")
+          def home():
+              return "Flask deployed successfully on Private EC2!"
 
-            @app.route("/health")
-            def health():
-                return {"status": "healthy"}
+          @app.route("/health")
+          def health():
+              return {"status": "healthy"}
 
-            if __name__ == "__main__":
-                app.run(host="0.0.0.0", port=5000)
-            PYTHON
+          if __name__ == "__main__":
+              app.run(host="0.0.0.0", port=5000)
+          PYTHON
 
-            # Create systemd service
             sudo tee /etc/systemd/system/flask-app.service > /dev/null <<EOF
-            [Unit]
-            Description=Python Flask Application
-            After=network.target
+          [Unit]
+          Description=Flask Application
+          After=network.target
 
-            [Service]
-            User=$(whoami)
-            WorkingDirectory=$HOME/flask-app
-            ExecStart=$HOME/flask-app/venv/bin/python $HOME/flask-app/app.py
-            Restart=always
-            RestartSec=5
+          [Service]
+          User=$(whoami)
+          WorkingDirectory=$APP_DIR
+          ExecStart=$APP_DIR/venv/bin/python $APP_DIR/app.py
+          Restart=always
 
-            [Install]
-            WantedBy=multi-user.target
-            EOF
+          [Install]
+          WantedBy=multi-user.target
+          EOF
 
-            # Enable and restart Flask service
             sudo systemctl daemon-reload
             sudo systemctl enable flask-app
             sudo systemctl restart flask-app
 
-            # Verify Flask service
             sudo systemctl is-active flask-app
 
-            echo "Flask application deployed successfully!"
+            echo "Flask deployed successfully on Private EC2"
 
           REMOTE
