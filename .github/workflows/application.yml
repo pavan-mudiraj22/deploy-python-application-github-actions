@@ -1,0 +1,23 @@
+name: Test EC2 SSH Connection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-connection:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+
+          ssh-keyscan -H "${{ secrets.BASTION_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Test Bastion Connection
+        run: |
+          ssh -i ~/.ssh/id_rsa \
+          ${{ secrets.BASTION_USER }}@${{ secrets.BASTION_HOST }} \
+          "hostname"
