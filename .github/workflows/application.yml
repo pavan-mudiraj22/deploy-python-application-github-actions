@@ -1,23 +1,115 @@
-name: Test EC2 SSH Connection
+
+name: Deploy Python Application to Private EC2
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
-  test-connection:
+  deploy:
+    name: Deploy Through Bastion Host
     runs-on: ubuntu-latest
 
     steps:
-      - name: Setup SSH
+      # Step 1: Checkout source code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Configure SSH
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
+          set -e
 
-          ssh-keyscan -H "${{ secrets.BASTION_HOST }}" >> ~/.ssh/known_hosts
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
 
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_rsa"
+          chmod 600 "$HOME/.ssh/id_rsa"
+
+          ssh-keygen -y -f "$HOME/.ssh/id_rsa" > /dev/null
+
+      # Step 3: Configure SSH known hosts
+      - name: Add Bastion Host Key
+        env:
+          BASTION_HOST: ${{ secrets.BASTION_HOST }}
+        run: |
+          set -e
+          ssh-keyscan -H "$BASTION_HOST" >> "$HOME/.ssh/known_hosts"
+
+      # Step 4: Configure SSH jump connection
+      - name: Configure SSH Jump Host
+        env:
+          BASTION_HOST: ${{ secrets.BASTION_HOST }}
+          BASTION_USER: ${{ secrets.BASTION_USER }}
+          PRIVATE_HOST: ${{ secrets.PRIVATE_HOST }}
+          PRIVATE_USER: ${{ secrets.PRIVATE_USER }}
+        run: |
+          cat >> "$HOME/.ssh/config" <<EOF
+          Host bastion
+            HostName $BASTION_HOST
+            User $BASTION_USER
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking yes
+
+          Host private-server
+            HostName $PRIVATE_HOST
+            User $PRIVATE_USER
+            ProxyJump bastion
+            IdentityFile ~/.ssh/id_rsa
+            StrictHostKeyChecking yes
+          EOF
+
+          chmod 600 "$HOME/.ssh/config"
+
+      # Step 5: Test Bastion connection
       - name: Test Bastion Connection
         run: |
-          ssh -i ~/.ssh/id_rsa \
-          ${{ secrets.BASTION_USER }}@${{ secrets.BASTION_HOST }} \
-          "hostname"
+          ssh bastion "hostname"
+
+      # Step 6: Add private server host key through Bastion
+      - name: Add Private Server Host Key
+        env:
+          PRIVATE_HOST: ${{ secrets.PRIVATE_HOST }}
+        run: |
+          ssh bastion "ssh-keyscan -H '$PRIVATE_HOST'" \
+            >> "$HOME/.ssh/known_hosts"
+
+      # Step 7: Test Private Server Connection
+      - name: Test Private EC2 Connection
+        run: |
+          ssh private-server "hostname && whoami"
+
+      # Step 8: Deploy Python Application
+      - name: Deploy Python Application
+        run: |
+          ssh private-server 'bash -s' <<'REMOTE'
+            set -e
+
+            APP_DIR="/home/ubuntu/my-python-app"
+
+            cd "$APP_DIR"
+
+            echo "Pulling latest application code..."
+            git pull origin main
+
+            echo "Setting up Python environment..."
+            python3 -m venv venv
+
+            source venv/bin/activate
+
+            echo "Installing requirements..."
+            pip install -r requirements.txt
+
+            echo "Restarting application..."
+            sudo systemctl restart my-python-app
+
+            echo "Checking application status..."
+            sudo systemctl status my-python-app --no-pager
+
+            echo "Deployment completed successfully!"
+          REMOTE
